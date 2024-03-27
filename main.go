@@ -1,10 +1,7 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -20,6 +17,16 @@ var (
 	samplesWrittenTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "samples_written_total",
+			Help: "number of samples written into clickhouse",
+		})
+	samplesWrittenTotalSamples = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "samples_written_total_samplesv2",
+			Help: "number of samples written into clickhouse",
+		})
+	samplesWrittenTotalTimeseries = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "samples_written_total_timeseriesv2",
 			Help: "number of samples written into clickhouse",
 		})
 	writeRequestsTotal = prometheus.NewCounter(
@@ -52,30 +59,30 @@ func init() {
 	prometheus.MustRegister(readErrorsTotal)
 }
 
-func read(ch *clickhouse.ClickHouseAdapter, w http.ResponseWriter, r *http.Request) error {
-	req, err := DecodeReadRequest(r.Body)
-	if err != nil {
-		return fmt.Errorf("DecodeReadRequest: %w", err)
-	}
-
-	res, err := ch.ReadRequest(r.Context(), req)
-	if err != nil {
-		return fmt.Errorf("ReadRequest: %w", err)
-	}
-
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	w.Header().Set("Content-Encoding", "snappy")
-
-	if err := EncodeReadResponse(res, w); err != nil {
-		return fmt.Errorf("EncodeReadResponse: %w", err)
-	}
-
-	return nil
-}
+//func read(ch *clickhouse.ClickHouseAdapter, w http.ResponseWriter, r *http.Request) error {
+//	req, err := DecodeReadRequest(r.Body)
+//	if err != nil {
+//		return fmt.Errorf("DecodeReadRequest: %w", err)
+//	}
+//
+//	res, err := ch.ReadRequest(r.Context(), req)
+//	if err != nil {
+//		return fmt.Errorf("ReadRequest: %w", err)
+//	}
+//
+//	w.Header().Set("Content-Type", "application/x-protobuf")
+//	w.Header().Set("Content-Encoding", "snappy")
+//
+//	if err := EncodeReadResponse(res, w); err != nil {
+//		return fmt.Errorf("EncodeReadResponse: %w", err)
+//	}
+//
+//	return nil
+//}
 
 func main() {
 	var httpAddr string
-	var clickAddr, database, username, password, table string
+	var clickAddr, database, username, password, table, samplesTable, timeSeriesTable, timeSeriesTableMap, metricFingerPrint string
 	var readIgnoreLabel string
 	var readIgnoreHints bool
 	var debug bool
@@ -85,6 +92,10 @@ func main() {
 	flag.StringVar(&username, "db.username", "default", "ClickHouse username")
 	flag.StringVar(&password, "db.password", "", "ClickHouse password")
 	flag.StringVar(&table, "table", "metrics.samples", "write to this database.tablename")
+	flag.StringVar(&samplesTable, "samplesTable", "metrics.samples", "write to this database.tablename")
+	flag.StringVar(&timeSeriesTable, "timeSeriesTable", "metrics.optimizedtimeseriesv2", "write to this database.tablename")
+	flag.StringVar(&timeSeriesTableMap, "timeSeriesTableMap", "metrics.optimizedtimeseriesmapv2", "write to this database.tablename")
+	flag.StringVar(&metricFingerPrint, "metricFingerPrint", "metrics.metricfingerprint", "write to this database.tablename")
 	flag.StringVar(&readIgnoreLabel, "read.ignore-label", "remote=clickhouse", "ignore this label in read requests")
 	flag.BoolVar(&readIgnoreHints, "read.ignore-hints", false, "ignore step/range hints in read requests")
 	flag.BoolVar(&debug, "debug", false, "print debug messages")
@@ -94,20 +105,25 @@ func main() {
 		httpAddr = ":" + httpAddr
 	}
 
+	//FingerPrintList := []uint64{}
 	logger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
 
 	ch, err := clickhouse.NewClickHouseAdapter(&clickhouse.Config{
-		Address:         clickAddr,
-		Database:        database,
-		Username:        username,
-		Password:        password,
-		Table:           table,
-		ReadIgnoreLabel: readIgnoreLabel,
-		ReadIgnoreHints: readIgnoreHints,
-		Debug:           debug,
+		Address:            clickAddr,
+		Database:           database,
+		Username:           username,
+		Password:           password,
+		Table:              table,
+		SamplesTable:       samplesTable,
+		TimeSeriesTable:    timeSeriesTable,
+		TimeSeriesTableMap: timeSeriesTableMap,
+		MetricFingerPrint:  metricFingerPrint,
+		ReadIgnoreLabel:    readIgnoreLabel,
+		ReadIgnoreHints:    readIgnoreHints,
+		Debug:              debug,
 	})
 	if err != nil {
 		logger.Fatal("NewClickHouseAdapter", zap.Error(err))
@@ -141,22 +157,68 @@ func main() {
 		}
 	})
 
-	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
-		readRequestsTotal.Inc()
+	http.HandleFunc("/optimizewrite", func(w http.ResponseWriter, r *http.Request) {
+		writeRequestsTotal.Inc()
 		defer r.Body.Close()
-		if err := read(ch, w, r); err != nil && !errors.Is(err, context.Canceled) {
-			readErrorsTotal.Inc()
-			logger.Error("ReadRequest", zap.Error(err))
+		req, err := DecodeWriteRequest(r.Body)
+		if err != nil {
+			writeErrorsTotal.Inc()
+			logger.Error("DecodeWriteRequest", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		//fmt.Println("req", req)
+		if countSamples, err := ch.WriteOptimizedRequestSamples(r.Context(), req); err != nil {
+			writeErrorsTotal.Inc()
+			logger.Error("WriteRequest", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		} else if countSamples > 0 {
+			samplesWrittenTotalSamples.Add(float64(countSamples))
+		}
+
+		//
+		//if countTimeSeries, err := ch.WriteOptimizedRequestTimeSeries(r.Context(), req); err != nil {
+		//	writeErrorsTotal.Inc()
+		//	logger.Error("WriteRequest", zap.Error(err))
+		//	http.Error(w, err.Error(), http.StatusInternalServerError)
+		//	return
+		//} else if countTimeSeries > 0 {
+		//	samplesWrittenTotalTimeseries.Add(float64(countTimeSeries))
+		//}
+		if countTimeSeries, err := ch.WriteOptimizedRequestTimeSeriesMap(r.Context(), req); err != nil {
+			writeErrorsTotal.Inc()
+			logger.Error("WriteRequest", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		} else if countTimeSeries > 0 {
+			samplesWrittenTotalTimeseries.Add(float64(countTimeSeries))
+			//fmt.Println("After fList", fList)
+			//FingerPrintList = fList
+		}
 	})
+
+	//http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
+	//	readRequestsTotal.Inc()
+	//	defer r.Body.Close()
+	//	if err := read(ch, w, r); err != nil && !errors.Is(err, context.Canceled) {
+	//		readErrorsTotal.Inc()
+	//		logger.Error("ReadRequest", zap.Error(err))
+	//		http.Error(w, err.Error(), http.StatusInternalServerError)
+	//		return
+	//	}
+	//})
 
 	logger.Info(
 		"listening",
 		zap.String("listen", httpAddr),
 		zap.String("db", clickAddr),
 		zap.String("table", table),
+		zap.String("samplesTable", samplesTable),
+		zap.String("timeSeriesTable", timeSeriesTable),
+		zap.String("timeSeriesTableMap", timeSeriesTableMap),
+		zap.String("metricFingerPrint:", metricFingerPrint),
 	)
 
 	if err := http.ListenAndServe(httpAddr, nil); err != nil {

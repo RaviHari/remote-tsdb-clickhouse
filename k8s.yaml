@@ -1,0 +1,90 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: addon-clickhouse-ns
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: remote-tsdb-clickhouse
+  name: remote-tsdb-clickhouse
+  namespace: addon-clickhouse-ns
+spec:
+  selector:
+    matchLabels:
+      app: remote-tsdb-clickhouse
+  template:
+    metadata:
+      labels:
+        app: remote-tsdb-clickhouse
+    spec:
+      containers:
+        - name: remote-tsdb-clickhouse
+          image: docker.intuit.com/personal/rhari/remote-tsdb-clickhouse:v1
+          args:
+            - "-debug=true"
+            - "-http=9131"
+            - "-db=chi-clickhouse-cluster-0-0.addon-clickhouse-ns.svc.cluster.local:9000"
+            - "-db.database=default"
+            - "-db.username=default"
+            - "-db.password="
+            - "-table=metrics.samples"
+            - "-samplesTable=metrics.optimizedsamplesv2"
+            - "-timeSeriesTable=metrics.optimizedtimeseriesv2"
+            - "-timeSeriesTableMap=metrics.optimizedtimeseriesmapv2"
+            - "-metricFingerPrint=metrics.metricfingerprint"
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 2000m
+              memory: 4Gi
+          ports:
+            - name: http
+              containerPort: 9131
+              protocol: TCP
+---
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler
+metadata:
+  labels:
+    app: remote-tsdb-clickhouse
+  name: remote-tsdb-clickhouse
+  namespace: addon-clickhouse-ns
+spec:
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - object:
+        describedObject:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: remote-tsdb-clickhouse
+        metric:
+          name: namespace_app_pod_cpu_utilization
+        target:
+          type: Value
+          value: 70
+      type: Object
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: remote-tsdb-clickhouse
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: remote-tsdb-clickhouse
+  labels:
+    app: remote-tsdb-clickhouse
+  namespace: addon-clickhouse-ns
+spec:
+  selector:
+    app: remote-tsdb-clickhouse
+  type: ClusterIP
+  ports:
+    - port: 9131
+      protocol: TCP
+      targetPort: http
+      name: http

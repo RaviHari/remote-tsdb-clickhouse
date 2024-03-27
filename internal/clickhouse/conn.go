@@ -17,21 +17,28 @@ type ClickHouseAdapter struct {
 	// NOTE: We switched to sql.DB, but clickhouse.Conn appears to handle
 	// PrepareBatch and Query correctly with multiple goroutines, despite
 	// technically being a "driver.Conn"
-	db              *sql.DB
-	table           string
-	readIgnoreLabel string
-	readIgnoreHints bool
+	db                 *sql.DB
+	table              string
+	samplesTable       string
+	timeSeriesTable    string
+	timeSeriesTableMap string
+	metricFingerPrint  string
+	readIgnoreLabel    string
+	readIgnoreHints    bool
 }
 
 type Config struct {
-	Address  string
-	Database string
-	Username string
-	Password string
-	Table    string
-
-	ReadIgnoreLabel string
-	ReadIgnoreHints bool
+	Address            string
+	Database           string
+	Username           string
+	Password           string
+	Table              string
+	SamplesTable       string
+	TimeSeriesTable    string
+	TimeSeriesTableMap string
+	MetricFingerPrint  string
+	ReadIgnoreLabel    string
+	ReadIgnoreHints    bool
 
 	Debug bool
 }
@@ -55,7 +62,7 @@ func NewClickHouseAdapter(config *Config) (*ClickHouseAdapter, error) {
 		//ConnMaxLifetime: time.Hour,
 	})
 	db.SetMaxOpenConns(16)
-	db.SetMaxIdleConns(1)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(time.Hour)
 
 	// Immediately try to connect with the provided credentials, fail fast.
@@ -64,9 +71,13 @@ func NewClickHouseAdapter(config *Config) (*ClickHouseAdapter, error) {
 	}
 
 	return &ClickHouseAdapter{
-		db:              db,
-		table:           config.Table,
-		readIgnoreLabel: config.ReadIgnoreLabel,
-		readIgnoreHints: config.ReadIgnoreHints,
+		db:                 db,
+		table:              config.Table,
+		samplesTable:       config.SamplesTable,
+		timeSeriesTable:    config.TimeSeriesTable,
+		timeSeriesTableMap: config.TimeSeriesTableMap,
+		metricFingerPrint:  config.MetricFingerPrint,
+		readIgnoreLabel:    config.ReadIgnoreLabel,
+		readIgnoreHints:    config.ReadIgnoreHints,
 	}, nil
 }
